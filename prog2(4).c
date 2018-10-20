@@ -114,7 +114,7 @@ void A_input(struct pkt packet)
         stoptimer(0);
         inTransition_A = 0;
       } else {
-        printf("wrong ack packet received from B: expected %d, but got %d\n", seqnums_A, packet.acknum);
+        printf("negative ack packet received from B: expected %d, but got %d\n", seqnums_A, packet.acknum);
       }
     } else {
         struct pkt ack_packet = create_pkt(-1000, packet.seqnum, NULL);
@@ -177,7 +177,7 @@ void B_input(struct pkt packet)
         stoptimer(1);
         inTransition_B = 0;
       } else {
-        printf("wrong ack packet received from A: expected %d, but got %d\n", seqnums_B, packet.acknum);
+        printf("negative ack packet received from A: expected %d, but got %d\n", seqnums_B, packet.acknum);
       }
     } else {
         struct pkt ack_packet = create_pkt(-1000, packet.seqnum, NULL);
@@ -206,7 +206,7 @@ void B_timerinterrupt()
 /* entity B routines are called. You can use it to do any initialization */
 void B_init()
 {
-  timeout_value = 40.0;
+  timeout_value = 20.0;
   seqnums_B = 0;
   inTransition_B = 0;
 }
