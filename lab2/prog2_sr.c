@@ -25,7 +25,7 @@
 
 struct msg {
   char data[20];
-  };
+};
 
 /* a packet is the data unit passed from layer 4 (students code) to layer */
 /* 3 (teachers code).  Note the pre-defined packet structure, which all   */
@@ -35,7 +35,7 @@ struct pkt {
    int acknum;
    int checksum;
    char payload[20];
-    };
+};
 
 void stoptimer(int AorB);
 void starttimer(int AorB, float increment);
@@ -45,19 +45,25 @@ void tolayer5(int AorB, char datasent[20]);
 /*
 Global variables
 */
+int MAX_BUFFER = 1500;
+const int WINDOW_SIZE = 8;
+struct pkt queue[50000];
+struct pkt receiver_buffer[WINDOW_SIZE];
 int seqnums_A;
-int seqnums_B;
+int base_A;
+// int seqnums_B;
 struct pkt data_packet_A;
-struct pkt data_packet_B;
+// struct pkt data_packet_B;
+int last_received_B;
 float timeout_value;
-int inTransition_A;
-int inTransition_B; 
-int state_A;
-int state_B;
 int from_app_A=0;
 int from_transport_A=0;
 int to_transport_B=0;
 int to_app_B=0;
+// int inTransition_A;
+// int inTransition_B; 
+// int state_A;
+// int state_B;
 
 int get_checksum(int seqnum, int acknum, char payload[20])
 {
@@ -69,7 +75,6 @@ int get_checksum(int seqnum, int acknum, char payload[20])
       checksum += (int)payload[i];
     }
   }
-  
   return checksum;
 }
 
@@ -94,16 +99,26 @@ void log_packet(char calling_entity, struct pkt packet) {
 void A_output(struct msg message)
 {
   from_app_A++;
-  if (inTransition_A == 1) {
-    printf("dropping packet at A since earlier packet still outstanding and is unacknowledged\n");
+  if (seqnums_A - base_A >= MAX_BUFFER) {
+    printf("exiting and dropping packet at A since outside the allowed MAX_BUFFER of %d\n", MAX_BUFFER);
+    exit(1);
   } else {
-    inTransition_A = 1;
+    // inTransition_A = 1;
     data_packet_A = create_pkt(seqnums_A, -1000, message.data);
-    log_packet('A', data_packet_A);
-    printf("checksum A is %d\n", data_packet_A.checksum);
-    starttimer(0, timeout_value);
-    tolayer3(0, data_packet_A);
-    from_transport_A++;
+    printf("at A, created packet with sequence number %d\n", seqnums_A);
+    queue[seqnums_A++] = data_packet_A;
+    if (seqnums_A - base_A <= WINDOW_SIZE) {
+        starttimer(seqnums_A-1, timeout_value);
+        log_packet('A', data_packet_A);
+        printf("checksum A is %d\n", data_packet_A.checksum);
+    
+        tolayer3(0, data_packet_A);
+        from_transport_A++;
+    }
+    else {
+        printf("at A, putting packet number %d into buffer since outside the window size of %d\n", seqnums_A-1, WINDOW_SIZE);
+    }
+    
   }
 }
 
@@ -114,26 +129,27 @@ void A_input(struct pkt packet)
   if (checksum == get_checksum(packet.seqnum, packet.acknum, packet.payload)) {
     if (packet.acknum != -1000)
     {
-      if (packet.acknum == seqnums_A) {
-        printf("correctly received acknowledgment from B with acknum %d\n", packet.acknum);
-        seqnums_A = 1 - seqnums_A;
-        stoptimer(0);
-        inTransition_A = 0;
-      } else {
-        printf("negative ack packet received from B: expected %d, but got %d\n", seqnums_A, packet.acknum);
-      }
-    } else {
-        printf("received packet from B with message %.*s\n", (int)sizeof(packet.payload), packet.payload);
-        struct pkt ack_packet = create_pkt(-1000, packet.seqnum, NULL);;
-        if (packet.seqnum == state_A) {
-          state_A = 1 - state_A;
-          printf("at A, packet with message %.*s and sequence number %d sent to layer 5 i.e. application layer\n", (int)sizeof(packet.payload), packet.payload, packet.seqnum);
-          tolayer5(0, packet.payload);
-          printf("ack sent from A with acknum %d\n", ack_packet.acknum);
-        } else {
-          printf("nack sent from A with nacknum %d\n", ack_packet.acknum);
+        printf("received acknowledgment from B with acknum %d\n", packet.acknum);
+        if (queue[packet.acknum].acknum != -1) {
+          stoptimer(packet.acknum);
+          queue[packet.acknum].acknum = -1;
+          if (base_A == packet.acknum) {
+            int packet_to_sent = base_A + WINDOW_SIZE;
+            base_A++;
+            while (queue[base_A].acknum == -1 && base_A < seqnums_A) {
+              base_A++;
+            }
+            printf("base_A moved to %d\n", base_A);
+            while (packet_to_sent < seqnums_A && packet_to_sent < base_A + WINDOW_SIZE) {
+              starttimer(packet_to_sent, timeout_value);
+              log_packet('A', queue[packet_to_sent]);
+              tolayer3(0, queue[packet_to_sent++]);
+            }
+          }
         }
-        tolayer3(0, ack_packet);
+        
+    } else {
+        printf("Something wrong: Should only receive ack packets from B since unidirectional\n");
     } 
   } else {
     printf("corrupt packet detected at A\n");
@@ -142,13 +158,13 @@ void A_input(struct pkt packet)
 }
 
 /* called when A's timer goes off */
-void A_timerinterrupt()
+void A_timerinterrupt(int packetType)
 {
+  printf("timeout happened at A for packet %d\n", packetType);
+  starttimer(packetType, timeout_value);
+  log_packet('A', queue[packetType]);
+  tolayer3(0, queue[packetType]);
   from_transport_A++;
-  printf("timeout happened at A\n");
-  starttimer(0, timeout_value);
-  log_packet('A', data_packet_A);
-  tolayer3(0, data_packet_A);
 }  
 
 /* the following routine will be called once (only) before any other */
@@ -156,81 +172,90 @@ void A_timerinterrupt()
 void A_init()
 {
   seqnums_A = 0;
+  base_A = 0;
   timeout_value = 20.0;
-  inTransition_A = 0;
-  state_A=0;
 }
 
 /* called from layer 5, passed the data to be sent to other side */
 void B_output(struct msg message)
 {
-  if (inTransition_B == 1) {
-    printf("dropping packet at B since earlier packet still outstanding and is unacknowledged\n");
-  } else {
-    inTransition_B = 1;
-
-    // printf("packet sent from B with message %.*s\n", (int)sizeof(message.data), message.data);
-    data_packet_B = create_pkt(seqnums_B, -1000, message.data);
-    log_packet('B', data_packet_B);
-    printf("checksum B is %d\n", data_packet_B.checksum);
-    starttimer(1, timeout_value);
-    tolayer3(1, data_packet_B);
-  }
-
 }
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 void B_input(struct pkt packet)
 {
   to_transport_B++;
   int checksum = packet.checksum;
-  if (checksum == get_checksum(packet.seqnum, packet.acknum, packet.payload)) {
+  // int ack_nack_number = last_received_B;
+  if (checksum == get_checksum(packet.seqnum, packet.acknum, packet.payload)) 
+  {
     if (packet.acknum != -1000)
     {
-      if (packet.acknum == seqnums_B) {
-        seqnums_B = 1-seqnums_B;
-        printf("correctly received acknowledgment from A with acknum %d\n", packet.acknum);
-        stoptimer(1);
-        inTransition_B = 0;
-      } else {
-        printf("negative ack packet received from A: expected %d, but got %d\n", seqnums_B, packet.acknum);
-      }
-    } else {
-        printf("received packet from A with message %.*s\n", (int)sizeof(packet.payload), packet.payload);
-        struct pkt ack_packet = create_pkt(-1000, packet.seqnum, NULL);;
-        if (packet.seqnum == state_B) {
-          state_B = 1 - state_B;
-          printf("at B, packet with message %.*s and sequence number %d sent to layer 5 i.e. application layer\n", (int)sizeof(packet.payload), packet.payload, packet.seqnum);
-          tolayer5(1, packet.payload);
-          to_app_B++;
-          printf("ack sent from B with acknum %d\n", ack_packet.acknum);
-        } else {
-          printf("nack sent from B with nacknum %d\n", ack_packet.acknum);
-        }
-        tolayer3(1, ack_packet);
-        
+        printf("at B, something wrong acknum should be -1000 since unidirectional\n");
     } 
-  } else {
-      //do nothing
-      printf("corrupt packet detected at B\n");
-  } 
+    else 
+    {  
+        printf("received packet from A with message %.*s, sequence number %d\n", (int)sizeof(packet.payload), packet.payload, packet.seqnum);
+        if (packet.seqnum == last_received_B + 1) 
+        {
+          printf("last received B is %d\n", last_received_B);
+            printf("at B, packet with message %.*s, seq number %d sent to layer 5 i.e. application layer\n", (int)sizeof(packet.payload), packet.payload,packet.seqnum);
+            to_app_B++;
+            tolayer5(1, packet.payload);
+            int i=packet.seqnum%WINDOW_SIZE;
+            receiver_buffer[i] = packet;
+            receiver_buffer[i].acknum =  -1;
+            i++;
+            last_received_B++;
+            // printf("test2\n");
+            i=i%WINDOW_SIZE;
+            while (receiver_buffer[i].acknum !=  -1) {
+              tolayer5(1, receiver_buffer[i].payload);
+              printf("at B, packet with message %.*s and sequence number %d sent to layer 5 i.e. application layer\n", (int)sizeof(receiver_buffer[i].payload), receiver_buffer[i].payload, receiver_buffer[i].seqnum);
+
+              to_app_B++;
+
+              receiver_buffer[i].acknum = -1;
+              i++;
+              i=i%WINDOW_SIZE;       
+              last_received_B++;
+            }     
+            // printf("test3\n");       
+        } 
+        else 
+        {
+            printf("not received expected packet from A, expected packet %d, got %d\n", last_received_B + 1, packet.seqnum);
+            if (packet.seqnum > last_received_B + WINDOW_SIZE) {
+              printf("at B, received packet number outside buffer window so ignoring packet %d.\n", packet.seqnum);
+              return;
+            }
+            else if (packet.seqnum > last_received_B){
+              printf("at B, buffering the packet %d in window\n", packet.seqnum);
+              receiver_buffer[packet.seqnum%WINDOW_SIZE] = packet;
+            }
+        }
+        struct pkt ack_packet = create_pkt(-1000, packet.seqnum, NULL);
+        printf("ack sent from B with acknum %d\n", ack_packet.acknum);
+        tolayer3(1, ack_packet);
+    }
+  }
+  else {
+    printf("corrupt packet detected at B\n");
+  }
 }
 
 /* called when B's timer goes off */
 void B_timerinterrupt()
 {
-  printf("timeout happened at B\n");
-  starttimer(1, timeout_value);
-  log_packet('B', data_packet_B);
-  tolayer3(1, data_packet_B);
 }
 
 /* the following rouytine will be called once (only) before any other */
 /* entity B routines are called. You can use it to do any initialization */
 void B_init()
 {
-  seqnums_B = 0;
-  inTransition_B = 0;
-  state_B=0;
+  last_received_B = -1;
+  for (int i=0; i < WINDOW_SIZE; i++) {
+    receiver_buffer[i].acknum = -1;
+  }
 }
 
 
@@ -349,9 +374,9 @@ main()
             }
           else if (eventptr->evtype ==  TIMER_INTERRUPT) {
             if (eventptr->eventity == A) 
-         A_timerinterrupt();
+         A_timerinterrupt(eventptr->eventity);
              else
-         B_timerinterrupt();
+         A_timerinterrupt(eventptr->eventity);
              }
           else  {
        printf("INTERNAL PANIC: unknown event type \n");
@@ -362,8 +387,9 @@ main()
 terminate:
    printf(" Simulator terminated at time %f\n after sending %d msgs from layer5\n",time,nsim);
 
+
    printf("Simulation Results:\n");
-   printf("Protocol: Alternating Bit Protocol\n");
+   printf("Protocol: Selective Repeat\n");
    printf("%d of packets sent from the Application Layer of Sender A\n", from_app_A);
    printf("%d of packets sent from the Transport Layer of Sender A\n", from_transport_A);
    printf("%d packets received at the Transport layer\n", to_transport_B);
